@@ -1,27 +1,17 @@
-"""Azure Document Intelligence Studio - Streamlit app.
-
-Flow:  Select model -> Upload documents -> Analyze Document -> View structured results
-
-Run:     streamlit run app.py
-Config:  a .env file next to this script (see .env.example), or paste the values in the sidebar
-"""
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import (
-    AnalyzeDocumentRequest,
-    DocumentAnalysisFeature,
-)
+from azure.ai.documentintelligence.models import ( AnalyzeDocumentRequest, DocumentAnalysisFeature,)
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 from dotenv import load_dotenv
 
-try:  # PyMuPDF renders the PDF / image preview
+try: 
     import pymupdf as fitz
 except ImportError:
     try:
@@ -29,17 +19,13 @@ except ImportError:
     except ImportError:
         fitz = None
 
-# Load .env from the same folder as this script (works regardless of the launch directory)
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
-
 def env(*names: str) -> str:
-    """First non-empty environment variable among `names`."""
     for n in names:
         if v := os.getenv(n, "").strip().strip('"').strip("'"):
             return v
     return ""
-
 
 ENV_ENDPOINT = env("DOCUMENTINTELLIGENCE_ENDPOINT", "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
 ENV_KEY = env("DOCUMENTINTELLIGENCE_API_KEY", "AZURE_DOCUMENT_INTELLIGENCE_KEY")
@@ -85,6 +71,7 @@ MODELS = {
     },
 }
 ALLOWED_TYPES = ["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif"]
+MAX_WORKERS = 4 
 
 
 # ----------------------------------------------------------------------------
@@ -97,11 +84,7 @@ def get_client(endpoint: str, key: str) -> DocumentIntelligenceClient:
 
 def analyze(client: DocumentIntelligenceClient, cfg: dict, data: bytes):
     kwargs = {"features": cfg["features"]} if cfg["features"] else {}
-    poller = client.begin_analyze_document(
-        cfg["model_id"],
-        body=AnalyzeDocumentRequest(bytes_source=data),
-        **kwargs,
-    )
+    poller = client.begin_analyze_document( cfg["model_id"], body=AnalyzeDocumentRequest(bytes_source=data), **kwargs, )
     return poller.result()
 
 
@@ -110,7 +93,7 @@ def _conf(x):
 
 
 def _val(x):
-    """Enum -> plain value."""
+    # converts an enum to its plain value
     return getattr(x, "value", x)
 
 
@@ -166,28 +149,15 @@ def parse(result) -> dict:
         page_no = p.bounding_regions[0].page_number if p.bounding_regions else None
         paragraphs.append({"Page": page_no, "Role": _val(p.role) or "text", "Text": p.content})
 
-    lang_rows = [
-        {
-            "Language": lg.locale,
-            "Confidence": _conf(lg.confidence),
-            "Characters": sum(s.length for s in (lg.spans or [])),
-        }
-        for lg in result.languages or []
-    ]
+    lang_rows = [ { "Language": lg.locale, "Confidence": _conf(lg.confidence), "Characters": sum(s.length for s in (lg.spans or [])), }
+        for lg in result.languages or [] ]
+    
     languages = pd.DataFrame(lang_rows)
     if not languages.empty:
-        languages = languages.groupby("Language", as_index=False).agg(
-            Confidence=("Confidence", "max"), Characters=("Characters", "sum")
-        )
+        languages = languages.groupby("Language", as_index=False).agg( Confidence=("Confidence", "max"), Characters=("Characters", "sum") )
 
-    kv = [
-        {
-            "Key": p.key.content if p.key else "",
-            "Value": p.value.content if p.value else "",
-            "Confidence": _conf(p.confidence),
-        }
-        for p in result.key_value_pairs or []
-    ]
+    kv = [{ "Key": p.key.content if p.key else "", "Value": p.value.content if p.value else "", "Confidence": _conf(p.confidence), }
+        for p in result.key_value_pairs or [] ]
 
     tables = []
     for t in result.tables or []:
@@ -208,7 +178,7 @@ def parse(result) -> dict:
         "Words": one(words),
         "Languages": one(languages),
         "Selection marks": one(marks),
-    }
+   }
 
     stats = [f"{len(result.pages or [])} page(s)"]
     if doc_types:
@@ -221,12 +191,7 @@ def parse(result) -> dict:
     except AttributeError:
         raw = dict(result)
 
-    return {
-        "sections": sections,
-        "stats": stats,
-        "text": result.content or "",
-        "json": json.dumps(raw, indent=2, default=str),
-    }
+    return { "sections": sections, "stats": stats, "text": result.content or "", "json": json.dumps(raw, indent=2, default=str) }
 
 
 # ----------------------------------------------------------------------------
@@ -284,21 +249,9 @@ def render_results(res: dict, tab_names: list, doc_id: str, name: str, model_lab
         st.warning("The model returned no structured data for this document. Check the Text tab.")
 
     with tabs[-2]:
-        st.text_area(
-            "Extracted text",
-            res["text"],
-            height=300,
-            label_visibility="collapsed",
-            key=f"text_{doc_id}_{model_label}",
-        )
+        st.text_area( "Extracted text", res["text"], height=300, label_visibility="collapsed", key=f"text_{doc_id}_{model_label}", )
     with tabs[-1]:
-        st.download_button(
-            "Download JSON",
-            res["json"],
-            file_name=f"{os.path.splitext(name)[0]}_{model_label.lower().replace(' ', '_')}.json",
-            mime="application/json",
-            key=f"dl_{doc_id}_{model_label}",
-        )
+        st.download_button( "Download JSON", res["json"], file_name=f"{os.path.splitext(name)[0]}_{model_label.lower().replace(' ', '_')}.json", mime="application/json", key=f"dl_{doc_id}_{model_label}", )
         st.json(res["json"], expanded=False)
 
 
@@ -321,11 +274,7 @@ with st.sidebar:
     if from_env:
         st.success("Endpoint and key loaded from .env", icon="✅")
     with st.expander("Connection details", expanded=not from_env):
-        endpoint = st.text_input(
-            "Endpoint",
-            value=ENV_ENDPOINT,
-            placeholder="https://<resource>.cognitiveservices.azure.com/",
-        ).strip()
+        endpoint = st.text_input( "Endpoint", value=ENV_ENDPOINT, placeholder="https://<resource>.cognitiveservices.azure.com/", ).strip()
         api_key = st.text_input("API key", value=ENV_KEY, type="password").strip()
 
 # ----------------------------------------------------------------------------
@@ -334,16 +283,12 @@ with st.sidebar:
 st.title("📄 Azure Document Intelligence")
 
 def reset_page():
-    """Called when the model changes: wipe documents, results, selection and the uploader."""
     st.session_state.docs = {}
     st.session_state.selected = []
     st.session_state.uploader_key += 1
 
-
 st.subheader("1 · Select a model")
-model_label = st.selectbox(
-    "Prebuilt model", list(MODELS), label_visibility="collapsed", on_change=reset_page
-)
+model_label = st.selectbox( "Prebuilt model", list(MODELS), label_visibility="collapsed", on_change=reset_page )
 cfg = MODELS[model_label]
 st.caption(f"`{cfg['model_id']}` · {cfg['help']}")
 
@@ -351,13 +296,8 @@ st.caption(f"`{cfg['model_id']}` · {cfg['help']}")
 # Step 2: upload (any number of files) + delete
 # ----------------------------------------------------------------------------
 st.subheader("2 · Upload documents")
-uploaded = st.file_uploader(
-    "Upload documents",
-    type=ALLOWED_TYPES,
-    accept_multiple_files=True,
-    key=f"uploader_{st.session_state.uploader_key}",
-    label_visibility="collapsed",
-)
+uploaded = st.file_uploader( "Upload documents", type=ALLOWED_TYPES, accept_multiple_files=True, 
+                            key=f"uploader_{st.session_state.uploader_key}", label_visibility="collapsed",)
 if uploaded:
     new_ids = []
     for f in uploaded:
@@ -367,10 +307,8 @@ if uploaded:
             docs[doc_id] = {"name": f.name, "data": data, "size": len(data), "results": {}, "errors": {}}
             new_ids.append(doc_id)
     st.session_state.selected = st.session_state.get("selected", []) + new_ids
-    st.session_state.toast = f"Added {len(new_ids)} document(s)" + (
-        f" ({len(uploaded) - len(new_ids)} duplicate skipped)" if len(uploaded) > len(new_ids) else ""
-    )
-    st.session_state.uploader_key += 1  # resets the uploader so files can be re-added later
+    st.session_state.toast = f"Added {len(new_ids)} document(s)" + ( f" ({len(uploaded) - len(new_ids)} duplicate skipped)" if len(uploaded) > len(new_ids) else "" )
+    st.session_state.uploader_key += 1
     st.rerun()
 
 if docs:
@@ -394,12 +332,7 @@ else:
 # ----------------------------------------------------------------------------
 st.subheader("3 · Analyze")
 st.session_state.selected = [i for i in st.session_state.get("selected", []) if i in docs]  # drop deleted
-selected = st.multiselect(
-    "Documents to analyze",
-    options=list(docs),
-    format_func=lambda i: docs[i]["name"],
-    key="selected",
-)
+selected = st.multiselect( "Documents to analyze", options=list(docs), format_func=lambda i: docs[i]["name"], key="selected",)
 
 col_a, col_b = st.columns([1, 3], vertical_alignment="center")
 ready = bool(selected and endpoint and api_key)
@@ -414,17 +347,24 @@ if run:
     if not todo:
         st.info("Nothing to do: all selected documents already have results for this model.")
     else:
-        bar = st.progress(0.0)
-        for n, doc_id in enumerate(todo, 1):
-            d = docs[doc_id]
-            bar.progress((n - 1) / len(todo), text=f"Analyzing {d['name']} ({n}/{len(todo)})")
-            try:
-                d["results"][model_label] = parse(analyze(client, cfg, d["data"]))
-                d["errors"].pop(model_label, None)
-            except HttpResponseError as e:
-                d["errors"][model_label] = e.message or str(e)
-            except Exception as e:  # noqa: BLE001
-                d["errors"][model_label] = str(e)
+        bar = st.progress(0.0, text=f"Analyzing {len(todo)} document(s)...")
+
+        def work(doc_id: str):
+            return parse(analyze(client, cfg, docs[doc_id]["data"]))
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(work, i): i for i in todo}
+            for n, fut in enumerate(as_completed(futures), 1):
+                doc_id = futures[fut]
+                d = docs[doc_id]
+                try:
+                    d["results"][model_label] = fut.result()
+                    d["errors"].pop(model_label, None)
+                except HttpResponseError as e:
+                    d["errors"][model_label] = e.message or str(e)
+                except Exception as e:  # noqa: BLE001
+                    d["errors"][model_label] = str(e)
+                bar.progress(n / len(todo), text=f"Finished {d['name']} ({n}/{len(todo)})")
         bar.empty()
         st.rerun()
 
