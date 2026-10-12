@@ -70,7 +70,8 @@ MODELS = {
         ),
     },
 }
-ALLOWED_TYPES = ["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif"]
+ALLOWED_TYPES = ["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif", "docx", "xlsx", "pptx", "html"]
+NO_PREVIEW_TYPES = {"docx", "xlsx", "pptx", "html"}
 MAX_WORKERS = 4 
 
 
@@ -218,6 +219,9 @@ def page_images(doc_id: str, filename: str, _data: bytes, max_pages: int = 10):
 
 
 def show_preview(doc_id: str, d: dict):
+    if d["name"].rsplit(".", 1)[-1].lower() in NO_PREVIEW_TYPES:
+        st.info("Preview isn't available for Office/HTML files, but they can still be analyzed.")
+        return
     try:
         if fitz is None:
             raise RuntimeError("PyMuPDF not installed")
@@ -331,7 +335,7 @@ else:
 # Step 3: analyze
 # ----------------------------------------------------------------------------
 st.subheader("3 · Analyze")
-st.session_state.selected = [i for i in st.session_state.get("selected", []) if i in docs]  # drop deleted
+st.session_state.selected = [i for i in st.session_state.get("selected", []) if i in docs]  
 selected = st.multiselect( "Documents to analyze", options=list(docs), format_func=lambda i: docs[i]["name"], key="selected",)
 
 col_a, col_b = st.columns([1, 3], vertical_alignment="center")
