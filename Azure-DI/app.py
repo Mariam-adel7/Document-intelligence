@@ -97,7 +97,11 @@ def get_client(endpoint: str, key: str) -> DocumentIntelligenceClient:
 
 def analyze(client: DocumentIntelligenceClient, cfg: dict, data: bytes):
     kwargs = {"features": cfg["features"]} if cfg["features"] else {}
-    poller = client.begin_analyze_document( cfg["model_id"], body=AnalyzeDocumentRequest(bytes_source=data), **kwargs, )
+    poller = client.begin_analyze_document(
+        cfg["model_id"],
+        body=AnalyzeDocumentRequest(bytes_source=data),
+        **kwargs,
+    )
     return poller.result()
 
 
@@ -280,7 +284,13 @@ def render_results(res: dict, tab_names: list, doc_id: str, name: str, model_lab
         st.warning("The model returned no structured data for this document. Check the Text tab.")
 
     with tabs[-2]:
-        st.text_area( "Extracted text", res["text"], height=300, label_visibility="collapsed", key=f"text_{doc_id}_{model_label}", )
+        st.text_area(
+            "Extracted text",
+            res["text"],
+            height=300,
+            label_visibility="collapsed",
+            key=f"text_{doc_id}_{model_label}",
+        )
     with tabs[-1]:
         st.download_button(
             "Download JSON",
@@ -323,8 +333,17 @@ with st.sidebar:
 # ----------------------------------------------------------------------------
 st.title("📄 Azure Document Intelligence")
 
+def reset_page():
+    """Called when the model changes: wipe documents, results, selection and the uploader."""
+    st.session_state.docs = {}
+    st.session_state.selected = []
+    st.session_state.uploader_key += 1
+
+
 st.subheader("1 · Select a model")
-model_label = st.selectbox("Prebuilt model", list(MODELS), label_visibility="collapsed")
+model_label = st.selectbox(
+    "Prebuilt model", list(MODELS), label_visibility="collapsed", on_change=reset_page
+)
 cfg = MODELS[model_label]
 st.caption(f"`{cfg['model_id']}` · {cfg['help']}")
 
