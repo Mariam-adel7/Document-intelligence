@@ -1,17 +1,22 @@
 import hashlib
+import html
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import ( AnalyzeDocumentRequest, DocumentAnalysisFeature,)
+from azure.ai.documentintelligence.models import (
+    AnalyzeDocumentRequest,
+    DocumentAnalysisFeature,
+)
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 from dotenv import load_dotenv
 
-try: 
+try:
     import pymupdf as fitz
 except ImportError:
     try:
@@ -21,11 +26,13 @@ except ImportError:
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
+
 def env(*names: str) -> str:
     for n in names:
         if v := os.getenv(n, "").strip().strip('"').strip("'"):
             return v
     return ""
+
 
 ENV_ENDPOINT = env("DOCUMENTINTELLIGENCE_ENDPOINT", "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
 ENV_KEY = env("DOCUMENTINTELLIGENCE_API_KEY", "AZURE_DOCUMENT_INTELLIGENCE_KEY")
@@ -72,7 +79,8 @@ MODELS = {
 }
 ALLOWED_TYPES = ["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif", "docx", "xlsx", "pptx", "html"]
 NO_PREVIEW_TYPES = {"docx", "xlsx", "pptx", "html"}
-MAX_WORKERS = 4 
+MAX_WORKERS = 4
+STEPS = ["Choose model", "Add documents", "Analyze", "Review results"]
 
 
 # ----------------------------------------------------------------------------
@@ -85,7 +93,9 @@ def get_client(endpoint: str, key: str) -> DocumentIntelligenceClient:
 
 def analyze(client: DocumentIntelligenceClient, cfg: dict, data: bytes):
     kwargs = {"features": cfg["features"]} if cfg["features"] else {}
-    poller = client.begin_analyze_document( cfg["model_id"], body=AnalyzeDocumentRequest(bytes_source=data), **kwargs, )
+    poller = client.begin_analyze_document(
+        cfg["model_id"], body=AnalyzeDocumentRequest(bytes_source=data), **kwargs
+    )
     return poller.result()
 
 
@@ -150,15 +160,28 @@ def parse(result) -> dict:
         page_no = p.bounding_regions[0].page_number if p.bounding_regions else None
         paragraphs.append({"Page": page_no, "Role": _val(p.role) or "text", "Text": p.content})
 
-    lang_rows = [ { "Language": lg.locale, "Confidence": _conf(lg.confidence), "Characters": sum(s.length for s in (lg.spans or [])), }
-        for lg in result.languages or [] ]
-    
+    lang_rows = [
+        {
+            "Language": lg.locale,
+            "Confidence": _conf(lg.confidence),
+            "Characters": sum(s.length for s in (lg.spans or [])),
+        }
+        for lg in result.languages or []
+    ]
     languages = pd.DataFrame(lang_rows)
     if not languages.empty:
-        languages = languages.groupby("Language", as_index=False).agg( Confidence=("Confidence", "max"), Characters=("Characters", "sum") )
+        languages = languages.groupby("Language", as_index=False).agg(
+            Confidence=("Confidence", "max"), Characters=("Characters", "sum")
+        )
 
-    kv = [{ "Key": p.key.content if p.key else "", "Value": p.value.content if p.value else "", "Confidence": _conf(p.confidence), }
-        for p in result.key_value_pairs or [] ]
+    kv = [
+        {
+            "Key": p.key.content if p.key else "",
+            "Value": p.value.content if p.value else "",
+            "Confidence": _conf(p.confidence),
+        }
+        for p in result.key_value_pairs or []
+    ]
 
     tables = []
     for t in result.tables or []:
@@ -179,7 +202,7 @@ def parse(result) -> dict:
         "Words": one(words),
         "Languages": one(languages),
         "Selection marks": one(marks),
-   }
+    }
 
     stats = [f"{len(result.pages or [])} page(s)"]
     if doc_types:
@@ -192,7 +215,101 @@ def parse(result) -> dict:
     except AttributeError:
         raw = dict(result)
 
-    return { "sections": sections, "stats": stats, "text": result.content or "", "json": json.dumps(raw, indent=2, default=str) }
+    return {
+        "sections": sections,
+        "stats": stats,
+        "text": result.content or "",
+        "json": json.dumps(raw, indent=2, default=str),
+    }
+
+
+# ----------------------------------------------------------------------------
+# Styling
+# ----------------------------------------------------------------------------
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #EEF1F6;
+  --surface: #FFFFFF;
+  --ink: #172033;
+  --muted: #5B6577;
+  --line: #D5DBE5;
+  --accent: #2F3FD0;
+  --accent-soft: #F4F5FF;
+  --ok: #1E7A4F;
+  --err: #B3261E;
+}
+
+.stApp,
+.stApp :where(p, span, div, label, button, input, textarea, li, a, h1, h2, h3, h4, code):not([data-testid="stIconMaterial"]) {
+  font-family: 'Public Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+.stApp { background: var(--bg); color: var(--ink); }
+.block-container { padding-top: 2rem; padding-bottom: 7rem; max-width: 1500px; }
+header[data-testid="stHeader"] { background: transparent; }
+
+/* title */
+.app-title { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+.app-sub { color: var(--muted); margin: .15rem 0 1.25rem; font-size: .95rem; }
+
+/* step tracker */
+.steps { display: flex; align-items: center; margin: 0 0 1.5rem; }
+.step { display: flex; align-items: center; gap: .6rem; color: var(--muted); font-weight: 500; font-size: .92rem; white-space: nowrap; }
+.step:not(:last-child) { flex: 1; }
+.step:not(:last-child)::after { content: ""; flex: 1; height: 2px; background: var(--line); margin: 0 .9rem; }
+.step .dot { width: 1.7rem; height: 1.7rem; border-radius: 50%; display: grid; place-items: center;
+             border: 2px solid var(--line); background: var(--surface); font-size: .8rem; font-weight: 700; flex: none; }
+.step.done { color: var(--ink); }
+.step.done .dot { background: var(--ok); border-color: var(--ok); color: #fff; }
+.step.done:not(:last-child)::after { background: var(--ok); }
+.step.active { color: var(--ink); font-weight: 700; }
+.step.active .dot { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 0 0 4px rgba(47,63,208,.15); }
+@media (max-width: 800px) { .step .lbl { display: none; } }
+
+/* panels */
+.st-key-controls, .st-key-workspace { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 1.25rem; }
+.panel-h { font-weight: 700; font-size: 1rem; margin: 0 0 .5rem; }
+.hint { color: var(--muted); font-size: .85rem; margin: .35rem 0 0; }
+
+/* drop zone */
+[data-testid="stFileUploaderDropzone"] {
+  border: 2px dashed var(--accent); background: var(--accent-soft); border-radius: 14px;
+  padding: 1.75rem 1rem; flex-direction: column; text-align: center; gap: .75rem;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] { flex-direction: column; align-items: center; }
+[data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
+[data-testid="stFileUploaderDropzone"]:hover { background: #ECEEFF; }
+
+/* format pills */
+.pills { display: flex; flex-wrap: wrap; gap: .35rem; margin: .6rem 0 .25rem; }
+.pill { background: #E7EAF2; color: var(--ink); font-size: .72rem; font-weight: 600; padding: .15rem .55rem; border-radius: 999px; }
+.pill.limit { background: var(--ink); color: #fff; }
+
+/* file queue */
+.qname { font-weight: 600; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qmeta { font-size: .78rem; color: var(--muted); }
+.bar { height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: .35rem; }
+.bar i { display: block; height: 100%; width: 100%; background: var(--accent); }
+.bar i.done { background: var(--ok); }
+.bar i.err { background: var(--err); }
+.ext { width: 44px; height: 56px; border-radius: 6px; background: #E7EAF2; display: grid; place-items: center;
+       font-size: .68rem; font-weight: 700; color: var(--muted); }
+
+/* results */
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .75rem; }
+.chip { background: var(--accent-soft); color: var(--accent); border: 1px solid #D9DCFA; font-size: .78rem; font-weight: 600; padding: .15rem .6rem; border-radius: 999px; }
+.empty { border: 1px dashed var(--line); border-radius: 12px; padding: 2.5rem 1.5rem; text-align: center; color: var(--muted); }
+.empty b { display: block; color: var(--ink); font-size: 1.05rem; margin-bottom: .35rem; }
+
+/* floating call-to-action */
+.st-key-cta { position: fixed; right: 2rem; bottom: 1.5rem; z-index: 1000; width: auto !important; }
+.st-key-cta button { border-radius: 999px; padding: .75rem 1.6rem; font-weight: 700;
+                     box-shadow: 0 8px 24px rgba(23,32,51,.25); }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
@@ -205,11 +322,24 @@ def fmt_size(n: float) -> str:
         n /= 1024
 
 
+def ext_of(name: str) -> str:
+    return name.rsplit(".", 1)[-1].lower()
+
+
+def stepper_html(current: int) -> str:
+    """current is 1-based; steps before it are shown as done."""
+    parts = []
+    for i, label in enumerate(STEPS, 1):
+        state = "done" if i < current else "active" if i == current else ""
+        dot = "✓" if i < current else str(i)
+        parts.append(f'<div class="step {state}"><span class="dot">{dot}</span><span class="lbl">{label}</span></div>')
+    return f'<div class="steps">{"".join(parts)}</div>'
+
+
 @st.cache_data(show_spinner=False, max_entries=32)
 def page_images(doc_id: str, filename: str, _data: bytes, max_pages: int = 10):
     """Render the first pages of a PDF / image to PNG bytes. `doc_id` is the cache key."""
-    ext = filename.rsplit(".", 1)[-1].lower()
-    doc = fitz.open(stream=_data, filetype=ext)
+    doc = fitz.open(stream=_data, filetype=ext_of(filename))
     try:
         total = doc.page_count
         imgs = [doc[i].get_pixmap(dpi=110).tobytes("png") for i in range(min(total, max_pages))]
@@ -218,8 +348,23 @@ def page_images(doc_id: str, filename: str, _data: bytes, max_pages: int = 10):
     return imgs, total
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def thumbnail(doc_id: str, filename: str, _data: bytes):
+    """First page as a small PNG, or None when it can't be rendered."""
+    if fitz is None or ext_of(filename) in NO_PREVIEW_TYPES:
+        return None
+    try:
+        doc = fitz.open(stream=_data, filetype=ext_of(filename))
+        try:
+            return doc[0].get_pixmap(dpi=36).tobytes("png")
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def show_preview(doc_id: str, d: dict):
-    if d["name"].rsplit(".", 1)[-1].lower() in NO_PREVIEW_TYPES:
+    if ext_of(d["name"]) in NO_PREVIEW_TYPES:
         st.info("Preview isn't available for Office/HTML files, but they can still be analyzed.")
         return
     try:
@@ -237,8 +382,19 @@ def show_preview(doc_id: str, d: dict):
             st.info("Preview isn't available for this file type, but it can still be analyzed.")
 
 
+def show_df(df: pd.DataFrame):
+    col_cfg = {}
+    if "Confidence" in df.columns and pd.api.types.is_numeric_dtype(df["Confidence"]):
+        col_cfg["Confidence"] = st.column_config.ProgressColumn(
+            "Confidence", min_value=0.0, max_value=1.0, format="%.2f"
+        )
+    st.dataframe(df, hide_index=True, column_config=col_cfg)
+
+
 def render_results(res: dict, tab_names: list, doc_id: str, name: str, model_label: str):
-    st.caption(" · ".join(res["stats"]))
+    chips = "".join(f'<span class="chip">{html.escape(s)}</span>' for s in res["stats"])
+    st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
+
     shown = [t for t in tab_names if res["sections"].get(t)]
     labels = [f"{t} ({sum(len(df) for _, df in res['sections'][t])})" for t in shown]
     tabs = st.tabs(labels + ["Text", "JSON"])
@@ -248,15 +404,26 @@ def render_results(res: dict, tab_names: list, doc_id: str, name: str, model_lab
             for title, df in res["sections"][t]:
                 if title:
                     st.markdown(f"**{title}**")
-                st.dataframe(df, hide_index=True)
+                show_df(df)
     if not shown:
         st.warning("The model returned no structured data for this document. Check the Text tab.")
 
+    slug = model_label.lower().replace(" ", "_")
     with tabs[-2]:
-        st.text_area( "Extracted text", res["text"], height=300, label_visibility="collapsed", key=f"text_{doc_id}_{model_label}", )
+        st.text_area(
+            "Extracted text", res["text"], height=300, label_visibility="collapsed",
+            key=f"text_{doc_id}_{model_label}",
+        )
     with tabs[-1]:
-        st.download_button( "Download JSON", res["json"], file_name=f"{os.path.splitext(name)[0]}_{model_label.lower().replace(' ', '_')}.json", mime="application/json", key=f"dl_{doc_id}_{model_label}", )
+        st.download_button(
+            "Download JSON", res["json"], file_name=f"{os.path.splitext(name)[0]}_{slug}.json",
+            mime="application/json", key=f"dl_{doc_id}_{model_label}",
+        )
         st.json(res["json"], expanded=False)
+
+
+def empty_state(title: str, body: str):
+    st.markdown(f'<div class="empty"><b>{html.escape(title)}</b>{html.escape(body)}</div>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
@@ -269,127 +436,180 @@ docs: dict = st.session_state.docs
 if msg := st.session_state.pop("toast", None):
     st.toast(msg)
 
-# ----------------------------------------------------------------------------
-# Sidebar: Azure connection
-# ----------------------------------------------------------------------------
-with st.sidebar:
-    st.header("Azure connection")
-    from_env = bool(ENV_ENDPOINT and ENV_KEY)
-    if from_env:
-        st.success("Endpoint and key loaded from .env", icon="✅")
-    with st.expander("Connection details", expanded=not from_env):
-        endpoint = st.text_input( "Endpoint", value=ENV_ENDPOINT, placeholder="https://<resource>.cognitiveservices.azure.com/", ).strip()
-        api_key = st.text_input("API key", value=ENV_KEY, type="password").strip()
+endpoint, api_key = ENV_ENDPOINT, ENV_KEY
+creds_ok = bool(endpoint and api_key)
 
-# ----------------------------------------------------------------------------
-# Step 1: select model
-# ----------------------------------------------------------------------------
-st.title("📄 Azure Document Intelligence")
 
 def reset_page():
     st.session_state.docs = {}
-    st.session_state.selected = []
     st.session_state.uploader_key += 1
+    st.session_state.pop("view_doc", None)
 
-st.subheader("1 · Select a model")
-model_label = st.selectbox( "Prebuilt model", list(MODELS), label_visibility="collapsed", on_change=reset_page )
-cfg = MODELS[model_label]
-st.caption(f"`{cfg['model_id']}` · {cfg['help']}")
 
 # ----------------------------------------------------------------------------
-# Step 2: upload (any number of files) + delete
+# Header + step tracker (filled in once state is known)
 # ----------------------------------------------------------------------------
-st.subheader("2 · Upload documents")
-uploaded = st.file_uploader( "Upload documents", type=ALLOWED_TYPES, accept_multiple_files=True, 
-                            key=f"uploader_{st.session_state.uploader_key}", label_visibility="collapsed",)
-if uploaded:
-    new_ids = []
-    for f in uploaded:
-        data = f.getvalue()
-        doc_id = hashlib.sha1(data).hexdigest()[:12]
-        if doc_id not in docs:
-            docs[doc_id] = {"name": f.name, "data": data, "size": len(data), "results": {}, "errors": {}}
-            new_ids.append(doc_id)
-    st.session_state.selected = st.session_state.get("selected", []) + new_ids
-    st.session_state.toast = f"Added {len(new_ids)} document(s)" + ( f" ({len(uploaded) - len(new_ids)} duplicate skipped)" if len(uploaded) > len(new_ids) else "" )
-    st.session_state.uploader_key += 1
-    st.rerun()
+st.markdown('<p class="app-title">Azure Document Intelligence</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="app-sub">Extract fields, text and tables from invoices, receipts and other documents.</p>',
+    unsafe_allow_html=True,
+)
+stepper_slot = st.empty()
 
-if docs:
-    with st.expander(f"Uploaded documents ({len(docs)})", expanded=True):
-        for doc_id, d in list(docs.items()):
-            c1, c2 = st.columns([10, 1], vertical_alignment="center")
-            done = ", ".join(d["results"]) or "not analyzed"
-            c1.markdown(f"**{d['name']}** · {fmt_size(d['size'])} · _{done}_")
-            if c2.button("✕", key=f"del_{doc_id}", help="Delete this document"):
-                del docs[doc_id]
-                st.rerun()
-        if st.button("Delete all"):
-            docs.clear()
+left, right = st.columns([2, 7], gap="large")
+
+# ----------------------------------------------------------------------------
+# Left: control panel (model + upload + queue)
+# ----------------------------------------------------------------------------
+with left:
+    with st.container(key="controls"):
+        st.markdown('<p class="panel-h">Model</p>', unsafe_allow_html=True)
+        model_label = st.selectbox(
+            "Prebuilt model", list(MODELS), label_visibility="collapsed", on_change=reset_page, key="model"
+        )
+        cfg = MODELS[model_label]
+        st.markdown(f'<p class="hint"><code>{cfg["model_id"]}</code> · {html.escape(cfg["help"])}</p>', unsafe_allow_html=True)
+
+        st.markdown('<p class="panel-h" style="margin-top:1.25rem">Documents</p>', unsafe_allow_html=True)
+        uploaded = st.file_uploader(
+            "Upload documents", type=ALLOWED_TYPES, accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_key}", label_visibility="collapsed",
+        )
+        pills = "".join(f'<span class="pill">{t.upper()}</span>' for t in ALLOWED_TYPES)
+        st.markdown(f'<div class="pills"><span class="pill limit">200 MB per file</span>{pills}</div>', unsafe_allow_html=True)
+
+        if uploaded:
+            new_ids = []
+            for f in uploaded:
+                data = f.getvalue()
+                doc_id = hashlib.sha1(data).hexdigest()[:12]
+                if doc_id not in docs:
+                    docs[doc_id] = {"name": f.name, "data": data, "size": len(data), "results": {}, "errors": {}}
+                    new_ids.append(doc_id)
+            if new_ids:
+                st.session_state.view_doc = new_ids[-1]
+            dupes = len(uploaded) - len(new_ids)
+            st.session_state.toast = f"Added {len(new_ids)} document(s)" + (f" ({dupes} duplicate skipped)" if dupes else "")
+            st.session_state.uploader_key += 1
             st.rerun()
+
+        progress_slot = st.empty()
+
+        if docs:
+            st.markdown(f'<p class="panel-h" style="margin-top:1.25rem">Queue ({len(docs)})</p>', unsafe_allow_html=True)
+            for doc_id, d in list(docs.items()):
+                if d["errors"].get(model_label):
+                    state, label = "err", "Failed"
+                elif model_label in d["results"]:
+                    state, label = "done", "Analyzed"
+                else:
+                    state, label = "", "Ready to analyze"
+                with st.container(border=True):
+                    c_thumb, c_info, c_del = st.columns([2, 6, 1.2], vertical_alignment="center")
+                    with c_thumb:
+                        thumb = thumbnail(doc_id, d["name"], d["data"])
+                        if thumb:
+                            st.image(thumb)
+                        else:
+                            st.markdown(f'<div class="ext">{ext_of(d["name"]).upper()}</div>', unsafe_allow_html=True)
+                    with c_info:
+                        st.markdown(
+                            f'<div class="qname" title="{html.escape(d["name"])}">{html.escape(d["name"])}</div>'
+                            f'<div class="qmeta">{fmt_size(d["size"])} · {label}</div>'
+                            f'<div class="bar"><i class="{state}"></i></div>',
+                            unsafe_allow_html=True,
+                        )
+                    with c_del:
+                        if st.button("✕", key=f"del_{doc_id}", help="Remove this document"):
+                            del docs[doc_id]
+                            st.rerun()
+            if st.button("Remove all"):
+                docs.clear()
+                st.rerun()
+
+        if not creds_ok:
+            st.error(
+                "Azure credentials not found. Set DOCUMENTINTELLIGENCE_ENDPOINT and "
+                "DOCUMENTINTELLIGENCE_API_KEY in your .env file, then restart the app."
+            )
+        with st.expander("Options"):
+            force = st.checkbox("Re-analyze documents that already have results for this model")
+
+# ----------------------------------------------------------------------------
+# Right: split view (original document | extracted data)
+# ----------------------------------------------------------------------------
+with right:
+    with st.container(key="workspace"):
+        if not docs:
+            empty_state(
+                "Your results will appear here",
+                "Add a document on the left to see the original beside its extracted fields.",
+            )
+        else:
+            if st.session_state.get("view_doc") not in docs:
+                st.session_state.view_doc = next(iter(docs))
+            if len(docs) > 1:
+                st.selectbox("Viewing", list(docs), format_func=lambda i: docs[i]["name"], key="view_doc")
+            view_id = st.session_state.view_doc
+            d = docs[view_id]
+
+            pv, rs = st.columns([4, 5], gap="medium")
+            with pv:
+                st.markdown('<p class="panel-h">Original</p>', unsafe_allow_html=True)
+                with st.container(height=680):
+                    show_preview(view_id, d)
+            with rs:
+                st.markdown(f'<p class="panel-h">Extracted data · {html.escape(model_label)}</p>', unsafe_allow_html=True)
+                if err := d["errors"].get(model_label):
+                    st.error(err)
+                elif res := d["results"].get(model_label):
+                    render_results(res, cfg["tabs"], view_id, d["name"], model_label)
+                else:
+                    empty_state(
+                        "Not analyzed yet",
+                        f"Use the Analyze button to extract data with {model_label}.",
+                    )
+
+# ----------------------------------------------------------------------------
+# Step tracker state
+# ----------------------------------------------------------------------------
+if not docs:
+    current = 2
+elif not any(model_label in d["results"] for d in docs.values()):
+    current = 3
 else:
-    st.info("Upload one or more documents to continue.")
-    st.stop()
+    current = 4
+stepper_slot.markdown(stepper_html(current), unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
-# Step 3: analyze
+# Floating call-to-action: only exists while there is something to analyze
 # ----------------------------------------------------------------------------
-st.subheader("3 · Analyze")
-st.session_state.selected = [i for i in st.session_state.get("selected", []) if i in docs]  
-selected = st.multiselect( "Documents to analyze", options=list(docs), format_func=lambda i: docs[i]["name"], key="selected",)
+pending = [i for i, d in docs.items() if force or model_label not in d["results"]]
+if pending:
+    with st.container(key="cta"):
+        n = len(pending)
+        run = st.button(f"Analyze {n} document{'s' if n != 1 else ''}", type="primary", disabled=not creds_ok)
 
-col_a, col_b = st.columns([1, 3], vertical_alignment="center")
-ready = bool(selected and endpoint and api_key)
-run = col_a.button("Analyze Document", type="primary", disabled=not ready)
-force = col_b.checkbox("Re-analyze documents that already have results for this model")
-if not (endpoint and api_key):
-    st.warning("Add your endpoint and API key in the sidebar (or in a .env file).")
-
-if run:
-    client = get_client(endpoint, api_key)
-    todo = [i for i in selected if force or model_label not in docs[i]["results"]]
-    if not todo:
-        st.info("Nothing to do: all selected documents already have results for this model.")
-    else:
-        bar = st.progress(0.0, text=f"Analyzing {len(todo)} document(s)...")
+    if run:
+        client = get_client(endpoint, api_key)
 
         def work(doc_id: str):
             return parse(analyze(client, cfg, docs[doc_id]["data"]))
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(work, i): i for i in todo}
-            for n, fut in enumerate(as_completed(futures), 1):
-                doc_id = futures[fut]
-                d = docs[doc_id]
-                try:
-                    d["results"][model_label] = fut.result()
-                    d["errors"].pop(model_label, None)
-                except HttpResponseError as e:
-                    d["errors"][model_label] = e.message or str(e)
-                except Exception as e:  # noqa: BLE001
-                    d["errors"][model_label] = str(e)
-                bar.progress(n / len(todo), text=f"Finished {d['name']} ({n}/{len(todo)})")
-        bar.empty()
+        with progress_slot.container():
+            bar = st.progress(0.0, text=f"Analyzing {n} document(s)...")
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = {pool.submit(work, i): i for i in pending}
+                for k, fut in enumerate(as_completed(futures), 1):
+                    doc_id = futures[fut]
+                    d = docs[doc_id]
+                    try:
+                        d["results"][model_label] = fut.result()
+                        d["errors"].pop(model_label, None)
+                    except HttpResponseError as e:
+                        d["errors"][model_label] = e.message or str(e)
+                    except Exception as e:  # noqa: BLE001
+                        d["errors"][model_label] = str(e)
+                    bar.progress(k / n, text=f"Finished {d['name']} ({k}/{n})")
+        progress_slot.empty()
         st.rerun()
-
-# ----------------------------------------------------------------------------
-# Step 4: preview + structured results
-# ----------------------------------------------------------------------------
-st.subheader("4 · Preview & results")
-if not selected:
-    st.caption("Select at least one document above.")
-
-for doc_id in selected:
-    d = docs[doc_id]
-    with st.expander(d["name"], expanded=len(selected) <= 3):
-        left, right = st.columns([2, 3])
-        with left:
-            with st.container(height=620):
-                show_preview(doc_id, d)
-        with right:
-            if err := d["errors"].get(model_label):
-                st.error(err)
-            elif res := d["results"].get(model_label):
-                render_results(res, cfg["tabs"], doc_id, d["name"], model_label)
-            else:
-                st.info(f"Click **Analyze Document** to extract data with **{model_label}**.")
