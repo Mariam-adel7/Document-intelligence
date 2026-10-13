@@ -1,0 +1,6 @@
+streamlit>=1.40
+azure-ai-documentintelligence>=1.0.0
+azure-core
+pandas
+python-dotenv
+pymupdf
