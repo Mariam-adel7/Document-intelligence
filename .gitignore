@@ -1,7 +1,6 @@
 # Secrets (Azure endpoint and key live here)
 .env
 .env.*
-!.env.example
 .streamlit/secrets.toml
 
 # Python
