@@ -21,6 +21,7 @@ Choose model  →  Add documents  →  Analyze  →  Review results
 - **Result tabs** tailored to each model, with confidence shown as progress bars, plus raw **Text** and **JSON** tabs and a JSON download button.
 - **Error handling per document:** one failing file doesn't stop the rest of the batch.
 - **Changing the model resets the page**, so you always start clean.
+- **Docker support:** run the app in a container without installing Python locally.
 
 ## 🧠 Supported models
 
@@ -42,12 +43,14 @@ Office and HTML files (`docx`, `xlsx`, `pptx`, `html`) can be analyzed, but they
 
 ## 🚀 Getting started
 
+You can run the app in two ways: **locally with Python**, or **in a Docker container**. Both need the same Azure credentials (see [Configure](#configure)).
+
 ### Prerequisites
 
-- Python 3.9+
 - An Azure **Document Intelligence** resource (endpoint + key)
+- **Either** Python 3.9+ (local run) **or** [Docker Desktop](https://www.docker.com/products/docker-desktop/) (container run)
 
-### Install
+### Install (local)
 
 ```bash
 git clone https://github.com/<your-username>/<your-repo>.git
@@ -74,6 +77,8 @@ The alternative names `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` and `AZURE_DOCUMENT
 
 > ⚠️ Never commit your `.env` file. The included `.gitignore` already excludes it.
 
+> 💡 If you run with Docker, write the values **without quotes** in `.env`. Docker's `--env-file` keeps quotes as part of the value.
+
 **Recommended:** the styling assumes a light theme. Create `.streamlit/config.toml` next to `app.py` so a dark OS theme doesn't clash:
 
 ```toml
@@ -81,11 +86,131 @@ The alternative names `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` and `AZURE_DOCUMENT
 base = "light"
 ```
 
-### Run
+> If you add this file and run with Docker, also add `COPY .streamlit .streamlit` to the `Dockerfile` (before the `USER app` line) so the theme is included in the image.
+
+### Run (local)
 
 ```bash
 streamlit run app.py
 ```
+
+Then open **http://localhost:8501**.
+
+## 🐳 Run with Docker
+
+The `Azure-DI` folder includes a `Dockerfile` and a `.dockerignore`, so you can run the app in a container with no local Python setup.
+
+### 1. Install Docker
+
+Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/). Wait until it shows **Engine running**, then check:
+
+```bash
+docker info
+```
+
+### 2. Add your credentials
+
+From the `Azure-DI` folder, create the `.env` file (see [Configure](#configure)):
+
+```bash
+cp env.example .env            # Windows PowerShell: copy env.example .env
+```
+
+Fill in your endpoint and key, **without quotes**.
+
+### 3. Build the image
+
+```bash
+docker build -t document-intelligence .
+```
+
+Don't forget the trailing `.`, which tells Docker to use the current folder.
+
+### 4. Run the container
+
+```bash
+docker run --rm -p 8501:8501 --env-file .env document-intelligence
+```
+
+Then open **http://localhost:8501**.
+
+To make the app reachable only from your own computer (not from other devices on your network), bind the port to localhost:
+
+```bash
+docker run --rm -p 127.0.0.1:8501:8501 --env-file .env document-intelligence
+```
+
+Press `Ctrl+C` in the terminal to stop the container.
+
+### The Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies first so Docker can cache this layer
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+# Run as a non-root user (-m creates a home folder, which Streamlit needs)
+RUN useradd -m app
+USER app
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+```
+
+A few things worth knowing:
+
+- `--server.address=0.0.0.0` is required. Without it Streamlit only listens inside the container and the browser can't reach it.
+- The app runs as a **non-root user** (`app`), so a vulnerability in the app doesn't give an attacker root access inside the container. The user is created *after* `pip install` because installing packages needs root.
+- `.env` is excluded by `.dockerignore`, so your Azure key is **never baked into the image**. It is passed in at run time with `--env-file`.
+
+### Optional: docker compose
+
+Create `docker-compose.yml` in `Azure-DI`:
+
+```yaml
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file: .env
+```
+
+```bash
+docker compose up --build      # build and start
+docker compose down            # stop
+```
+
+### Useful Docker commands
+
+| Task | Command |
+|---|---|
+| List images | `docker images` |
+| List running containers | `docker ps` |
+| View logs | `docker logs <container-id>` |
+| Stop a container | `docker stop <container-id>` |
+| Check disk usage | `docker system df` |
+| Clear build cache | `docker builder prune -a -f` |
+
+### Troubleshooting
+
+- **`failed to connect to the docker API`:** Docker Desktop isn't running. Start it and wait for **Engine running**.
+- **`docker build` says it requires 1 argument:** you left off the trailing `.`.
+- **Page won't load:** check that the `-p 8501:8501` flag is present and that the `CMD` includes `--server.address=0.0.0.0`.
+- **"Credentials missing" in the app:** the environment variables didn't reach the container. Run the command from the folder that contains `.env`, and check there are no quotes around the values.
+- **Windows Firewall prompt for Docker Desktop Backend:** this is normal. Allow **Private networks** only, or click Cancel. The app still works at `localhost`.
+- **Build is huge or very slow:** check that `requirements.txt` only lists the packages above (no extra heavy packages such as `onnxruntime`), and that `.venv/` is listed in `.dockerignore`.
+
+### Sharing the app
+
+Pushing this repo to GitHub shares the **code and the recipe**, not a running app. Anyone who wants to run it needs Docker and **their own** Azure Document Intelligence resource and key. To give people a link that opens in a browser, deploy the container to a hosting service (for example Azure Container Apps) and store the credentials as secrets in the service settings, never inside the image. Because the app has no login, anyone with the link would use your Azure quota, so consider adding authentication and spending alerts first.
 
 ## 🖱️ How to use
 
@@ -104,6 +229,8 @@ The whole app lives in a single file, `app.py`:
 ├── README.md
 └── Azure-DI/
     ├── app.py             # the entire Streamlit app
+    ├── Dockerfile         # container build recipe
+    ├── .dockerignore      # keeps .env, .venv and caches out of the image
     ├── env.example        # copy to .env and fill in
     └── requirements.txt
 ```
@@ -174,6 +301,8 @@ st.session_state.docs = {
 
 **Change the look:** colors live in the `:root` variables at the top of the `CSS` block.
 
+After changing `app.py` or `requirements.txt`, rebuild the Docker image with `docker build -t document-intelligence .` to pick up the changes.
+
 ## 💳 Pricing tier and limits
 
 This resource runs on the **S0 Standard** tier. Things to know:
@@ -188,3 +317,4 @@ This resource runs on the **S0 Standard** tier. Things to know:
 - Password-protected PDFs aren't supported.
 - Documents and results are kept **in memory** for the current browser session only. Nothing is written to disk.
 - Streamlit state is only written from the main thread. Worker threads only call Azure and parse the result.
+- Never put your Azure key in the `Dockerfile`, the image, or the repository. Always pass it through `.env` or your hosting service's secret settings.
