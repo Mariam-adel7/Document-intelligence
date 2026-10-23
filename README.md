@@ -79,14 +79,6 @@ The alternative names `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` and `AZURE_DOCUMENT
 
 > 💡 If you run with Docker, write the values **without quotes** in `.env`. Docker's `--env-file` keeps quotes as part of the value.
 
-**Recommended:** the styling assumes a light theme. Create `.streamlit/config.toml` next to `app.py` so a dark OS theme doesn't clash:
-
-```toml
-[theme]
-base = "light"
-```
-
-> If you add this file and run with Docker, also add `COPY .streamlit .streamlit` to the `Dockerfile` (before the `USER app` line) so the theme is included in the image.
 
 ### Run (local)
 
@@ -170,43 +162,7 @@ A few things worth knowing:
 - The app runs as a **non-root user** (`app`), so a vulnerability in the app doesn't give an attacker root access inside the container. The user is created *after* `pip install` because installing packages needs root.
 - `.env` is excluded by `.dockerignore`, so your Azure key is **never baked into the image**. It is passed in at run time with `--env-file`.
 
-### Optional: docker compose
 
-Create `docker-compose.yml` in `Azure-DI`:
-
-```yaml
-services:
-  app:
-    build: .
-    ports:
-      - "8501:8501"
-    env_file: .env
-```
-
-```bash
-docker compose up --build      # build and start
-docker compose down            # stop
-```
-
-### Useful Docker commands
-
-| Task | Command |
-|---|---|
-| List images | `docker images` |
-| List running containers | `docker ps` |
-| View logs | `docker logs <container-id>` |
-| Stop a container | `docker stop <container-id>` |
-| Check disk usage | `docker system df` |
-| Clear build cache | `docker builder prune -a -f` |
-
-### Troubleshooting
-
-- **`failed to connect to the docker API`:** Docker Desktop isn't running. Start it and wait for **Engine running**.
-- **`docker build` says it requires 1 argument:** you left off the trailing `.`.
-- **Page won't load:** check that the `-p 8501:8501` flag is present and that the `CMD` includes `--server.address=0.0.0.0`.
-- **"Credentials missing" in the app:** the environment variables didn't reach the container. Run the command from the folder that contains `.env`, and check there are no quotes around the values.
-- **Windows Firewall prompt for Docker Desktop Backend:** this is normal. Allow **Private networks** only, or click Cancel. The app still works at `localhost`.
-- **Build is huge or very slow:** check that `requirements.txt` only lists the packages above (no extra heavy packages such as `onnxruntime`), and that `.venv/` is listed in `.dockerignore`.
 
 ### Sharing the app
 
