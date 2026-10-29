@@ -1,7 +1,12 @@
 import hashlib
 import html
+import io
 import json
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -23,6 +28,16 @@ except ImportError:
         import fitz
     except ImportError:
         fitz = None
+
+# Optional, used only to preview Office files:  pip install mammoth python-pptx openpyxl
+try:
+    import mammoth
+except ImportError:
+    mammoth = None
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
@@ -46,39 +61,45 @@ MODELS = {
     "Prebuilt Invoice": {
         "model_id": "prebuilt-invoice",
         "features": [],
+        "office": False,  # PDF / images only
         "tabs": ["Fields", "Line items"],
         "help": "Vendor, customer, dates, totals, tax and line items.",
     },
     "Prebuilt Receipt": {
         "model_id": "prebuilt-receipt",
         "features": [],
+        "office": False,  # PDF / images only
         "tabs": ["Fields", "Line items"],
         "help": "Merchant, date, totals, tax, tip and purchased items.",
     },
     "Prebuilt Read": {
         "model_id": "prebuilt-read",
         "features": [],
+        "office": True,
         "tabs": ["Lines", "Paragraphs", "Words", "Languages"],
         "help": "OCR: printed and handwritten text, words with confidence, detected languages.",
     },
     "Prebuilt Layout": {
         "model_id": "prebuilt-layout",
-        "features": [],
+        "features": [],  # key-value pairs are not shown in this view, and add-ons do not work on Office files
+        "office": True,
         "tabs": ["Paragraphs", "Tables", "Selection marks"],
         "help": "Document structure: paragraphs with roles, tables and selection marks.",
     },
     "Prebuilt General Document": {
         "model_id": "prebuilt-layout",
         "features": [DocumentAnalysisFeature.KEY_VALUE_PAIRS],
+        "office": False,  # the key-value add-on is not supported on Office / HTML files
         "tabs": ["Key-value pairs", "Tables", "Paragraphs"],
         "help": (
             "Key-value pairs, tables and text. In API v4 the old prebuilt-document model "
-            "is replaced by Layout + the key-value-pairs add-on, which is what runs here."
+            "is replaced by Layout + the key-value-pairs add-on, which is what runs here. PDF and images only."
         ),
     },
 }
 ALLOWED_TYPES = ["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "heif", "docx", "xlsx", "pptx", "html"]
-NO_PREVIEW_TYPES = {"docx", "xlsx", "pptx", "html"}
+OFFICE_TYPES = {"docx", "xlsx", "pptx", "html"}  # only Read and Layout accept these, and without add-on features
+NO_PREVIEW_TYPES = OFFICE_TYPES
 MAX_WORKERS = 4
 STEPS = ["Choose model", "Add documents", "Analyze", "Review results"]
 
@@ -91,8 +112,12 @@ def get_client(endpoint: str, key: str) -> DocumentIntelligenceClient:
     return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
 
-def analyze(client: DocumentIntelligenceClient, cfg: dict, data: bytes):
-    kwargs = {"features": cfg["features"]} if cfg["features"] else {}
+def analyze(client: DocumentIntelligenceClient, cfg: dict, data: bytes, filename: str):
+    is_office = ext_of(filename) in OFFICE_TYPES
+    if is_office and not cfg["office"]:
+        raise ValueError(f"{cfg['model_id']} accepts PDF and images only, not .{ext_of(filename)} files.")
+    features = [] if is_office else cfg["features"]  # add-on capabilities are not supported for Office files
+    kwargs = {"features": features} if features else {}
     poller = client.begin_analyze_document(
         cfg["model_id"], body=AnalyzeDocumentRequest(bytes_source=data), **kwargs
     )
@@ -170,9 +195,7 @@ def parse(result) -> dict:
     ]
     languages = pd.DataFrame(lang_rows)
     if not languages.empty:
-        languages = languages.groupby("Language", as_index=False).agg(
-            Confidence=("Confidence", "max"), Characters=("Characters", "sum")
-        )
+        languages = languages.groupby("Language", as_index=False).agg( Confidence=("Confidence", "max"), Characters=("Characters", "sum") )
 
     kv = [
         {
@@ -363,9 +386,121 @@ def thumbnail(doc_id: str, filename: str, _data: bytes):
         return None
 
 
+def _soffice_path():
+    for name in ("soffice", "libreoffice"):
+        if p := shutil.which(name):
+            return p
+    for p in (
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+@st.cache_data(show_spinner="Rendering preview...", max_entries=16)
+def office_to_pdf(doc_id: str, filename: str, _data: bytes):
+    """Word / Excel / PowerPoint -> PDF bytes via LibreOffice, or None when it isn't installed or fails."""
+    exe = _soffice_path()
+    if not exe:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"doc.{ext_of(filename)}"
+        src.write_bytes(_data)
+        profile = (Path(tmp) / "profile").as_uri()  # private profile: no clash with an open LibreOffice
+        try:
+            subprocess.run(
+                [exe, f"-env:UserInstallation={profile}", "--headless", "--convert-to", "pdf",
+                 "--outdir", tmp, str(src)],
+                check=True, capture_output=True, timeout=90,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        pdf = Path(tmp) / "doc.pdf"
+        return pdf.read_bytes() if pdf.exists() else None
+
+
+def office_html(filename: str, data: bytes):
+    """Simplified HTML rendering of an Office / HTML file with pure-Python libraries, or None."""
+    ext = ext_of(filename)
+    try:
+        if ext == "html":
+            text = data.decode("utf-8", errors="replace")
+            if m := re.search(r"(?is)<body[^>]*>(.*)</body>", text):
+                text = m.group(1)
+            # scripts / styles from an uploaded file must not touch the app
+            return re.sub(r"(?is)<(script|style)\b.*?</\1>|<link\b[^>]*>", "", text)
+        if ext == "docx" and mammoth:
+            return mammoth.convert_to_html(io.BytesIO(data)).value
+        if ext == "xlsx":
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None)
+            return "".join(
+                f"<h3>{html.escape(str(name))}</h3>" + df.fillna("").to_html(header=False, index=False, border=1)
+                for name, df in sheets.items()
+            )
+        if ext == "pptx" and Presentation:
+            out = []
+            for i, slide in enumerate(Presentation(io.BytesIO(data)).slides, 1):
+                out.append(f"<h3>Slide {i}</h3>")
+                for sh in slide.shapes:
+                    if getattr(sh, "has_table", False) and sh.has_table:
+                        rows = "".join(
+                            "<tr>" + "".join(f"<td>{html.escape(c.text)}</td>" for c in r.cells) + "</tr>"
+                            for r in sh.table.rows
+                        )
+                        out.append(f"<table>{rows}</table>")
+                    elif sh.has_text_frame and sh.text_frame.text.strip():
+                        out.append("<p>" + html.escape(sh.text_frame.text).replace("\n", "<br>") + "</p>")
+            return "".join(out)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+_PREVIEW_CSS = (
+    ".office-preview{font-size:14px;color:#172033;}"
+    ".office-preview table{border-collapse:collapse;margin:8px 0;}"
+    ".office-preview td,.office-preview th{border:1px solid #D5DBE5;padding:4px 8px;vertical-align:top;}"
+    ".office-preview :is(p,td,th,li,h1,h2,h3,h4,h5,h6){unicode-bidi:plaintext;}"  # each paragraph picks its own direction (Arabic / English)
+    ".office-preview img{max-width:100%;height:auto;}"
+)
+
+
+def show_office_preview(doc_id: str, d: dict):
+    ext = ext_of(d["name"])
+
+    # 1) Exact look: render pages through LibreOffice -> PDF -> PyMuPDF (when LibreOffice is installed)
+    if ext != "html" and fitz is not None:
+        pdf = office_to_pdf(doc_id, d["name"], d["data"])
+        if pdf:
+            try:
+                imgs, total = page_images(f"{doc_id}-pdf", "preview.pdf", pdf)
+                for i, img in enumerate(imgs, 1):
+                    st.image(img, caption=f"Page {i} of {total}")
+                if total > len(imgs):
+                    st.caption(f"Preview limited to the first {len(imgs)} pages (the whole file is analyzed).")
+                return
+            except Exception:  # noqa: BLE001
+                pass
+
+    # 2) Fallback: simplified rendering from the file's content
+    body = office_html(d["name"], d["data"])
+    if body:
+        st.html(f'<style>{_PREVIEW_CSS}</style><div class="office-preview">{body}</div>')  # st.html sanitizes the markup
+        if ext != "html":
+            st.caption("Simplified preview (layout may differ from the original). Install LibreOffice for page-accurate previews.")
+        return
+    st.info(
+        "Preview isn't available for this file. Install `mammoth` (Word), `openpyxl` (Excel) or "
+        "`python-pptx` (PowerPoint) to enable it. The file can still be analyzed."
+    )
+
+
 def show_preview(doc_id: str, d: dict):
-    if ext_of(d["name"]) in NO_PREVIEW_TYPES:
-        st.info("Preview isn't available for Office/HTML files, but they can still be analyzed.")
+    if ext_of(d["name"]) in OFFICE_TYPES:
+        show_office_preview(doc_id, d)
         return
     try:
         if fitz is None:
@@ -385,9 +520,7 @@ def show_preview(doc_id: str, d: dict):
 def show_df(df: pd.DataFrame):
     col_cfg = {}
     if "Confidence" in df.columns and pd.api.types.is_numeric_dtype(df["Confidence"]):
-        col_cfg["Confidence"] = st.column_config.ProgressColumn(
-            "Confidence", min_value=0.0, max_value=1.0, format="%.2f"
-        )
+        col_cfg["Confidence"] = st.column_config.ProgressColumn( "Confidence", min_value=0.0, max_value=1.0, format="%.2f" )
     st.dataframe(df, hide_index=True, column_config=col_cfg)
 
 
@@ -471,12 +604,19 @@ with left:
         st.markdown(f'<p class="hint"><code>{cfg["model_id"]}</code> · {html.escape(cfg["help"])}</p>', unsafe_allow_html=True)
 
         st.markdown('<p class="panel-h" style="margin-top:1.25rem">Documents</p>', unsafe_allow_html=True)
+        allowed_types = ALLOWED_TYPES if cfg["office"] else [t for t in ALLOWED_TYPES if t not in OFFICE_TYPES]
         uploaded = st.file_uploader(
-            "Upload documents", type=ALLOWED_TYPES, accept_multiple_files=True,
+            "Upload documents", type=allowed_types, accept_multiple_files=True,
             key=f"uploader_{st.session_state.uploader_key}", label_visibility="collapsed",
         )
-        pills = "".join(f'<span class="pill">{t.upper()}</span>' for t in ALLOWED_TYPES)
+        pills = "".join(f'<span class="pill">{t.upper()}</span>' for t in allowed_types)
         st.markdown(f'<div class="pills"><span class="pill limit">200 MB per file</span>{pills}</div>', unsafe_allow_html=True)
+        if not cfg["office"]:
+            st.markdown(
+                '<p class="hint">This model accepts PDF and images only. '
+                'Use Read or Layout for Word, Excel, PowerPoint and HTML files.</p>',
+                unsafe_allow_html=True,
+            )
 
         if uploaded:
             new_ids = []
@@ -594,7 +734,7 @@ if pending:
         client = get_client(endpoint, api_key)
 
         def work(doc_id: str):
-            return parse(analyze(client, cfg, docs[doc_id]["data"]))
+            return parse(analyze(client, cfg, docs[doc_id]["data"], docs[doc_id]["name"]))
 
         with progress_slot.container():
             bar = st.progress(0.0, text=f"Analyzing {n} document(s)...")
